@@ -1,16 +1,13 @@
 package com.alibaba.fastjson.util;
 
 import java.lang.annotation.Annotation;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Type;
+import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.PropertyNamingStrategy;
 import com.alibaba.fastjson.annotation.JSONCreator;
@@ -221,6 +218,40 @@ public class JavaBeanInfo {
         return build(clazz, type, propertyNamingStrategy, false, TypeUtils.compatibleWithJavaBean, false);
     }
 
+    private static Map<TypeVariable, Type> buildGenericInfo(Class<?> clazz) {
+        Class<?> childClass = clazz;
+        Class<?> currentClass = clazz.getSuperclass();
+        if (currentClass == null) {
+            return null;
+        }
+
+        Map<TypeVariable, Type> typeVarMap = null;
+
+        //analyse the whole generic info from the class inheritance
+        for (; currentClass != null && currentClass != Object.class; childClass = currentClass, currentClass = currentClass.getSuperclass()) {
+            if (childClass.getGenericSuperclass() instanceof ParameterizedType) {
+                Type[] childGenericParentActualTypeArgs = ((ParameterizedType) childClass.getGenericSuperclass()).getActualTypeArguments();
+                TypeVariable[] currentTypeParameters = currentClass.getTypeParameters();
+                for (int i = 0; i < childGenericParentActualTypeArgs.length; i++) {
+                    //if the child class's generic super class actual args is defined in the child class type parameters
+                    if (typeVarMap == null) {
+                        typeVarMap = new HashMap<TypeVariable, Type>();
+                    }
+
+                    if (typeVarMap.containsKey(childGenericParentActualTypeArgs[i])) {
+                        Type actualArg = typeVarMap.get(childGenericParentActualTypeArgs[i]);
+                        typeVarMap.put(currentTypeParameters[i], actualArg);
+                    } else {
+                        typeVarMap.put(currentTypeParameters[i], childGenericParentActualTypeArgs[i]);
+                    }
+                }
+            }
+        }
+
+        return typeVarMap;
+    }
+
+
     public static JavaBeanInfo build(Class<?> clazz //
             , Type type //
             , PropertyNamingStrategy propertyNamingStrategy //
@@ -249,6 +280,7 @@ public class JavaBeanInfo {
 
         Field[] declaredFields = clazz.getDeclaredFields();
         Method[] methods = clazz.getMethods();
+        Map<TypeVariable, Type> genericInfo = buildGenericInfo(clazz);
 
         boolean kotlin = TypeUtils.isKotlin(clazz);
         Constructor[] constructors = clazz.getDeclaredConstructors();
@@ -274,12 +306,33 @@ public class JavaBeanInfo {
 
                 computeFields(clazz, type, propertyNamingStrategy, fieldList, fields);
             }
+
+            if (defaultConstructor != null) {
+                TypeUtils.setAccessible(defaultConstructor);
+            }
+
             return new JavaBeanInfo(clazz, builderClass, defaultConstructor, null, factoryMethod, buildMethod, jsonType, fieldList);
         }
 
         boolean isInterfaceOrAbstract = clazz.isInterface() || Modifier.isAbstract(clazz.getModifiers());
         if ((defaultConstructor == null && builderClass == null) || isInterfaceOrAbstract) {
-            creatorConstructor = getCreatorConstructor(constructors);
+
+            Type mixInType = JSON.getMixInAnnotations(clazz);
+            if (mixInType instanceof Class) {
+                Constructor<?>[] mixInConstructors = ((Class<?>) mixInType).getConstructors();
+                Constructor<?> mixInCreator = getCreatorConstructor(mixInConstructors);
+                if (mixInCreator != null) {
+                    try {
+                        creatorConstructor = clazz.getConstructor(mixInCreator.getParameterTypes());
+                    } catch (NoSuchMethodException e) {
+                        // skip
+                    }
+                }
+            }
+
+            if (creatorConstructor == null) {
+                creatorConstructor = getCreatorConstructor(constructors);
+            }
 
             if (creatorConstructor != null && !isInterfaceOrAbstract) { // 基于标记 JSONCreator 注解的构造方法
                 TypeUtils.setAccessible(creatorConstructor);
@@ -289,7 +342,7 @@ public class JavaBeanInfo {
                 String[] lookupParameterNames = null;
                 if (types.length > 0) {
                     Annotation[][] paramAnnotationArrays = TypeUtils.getParameterAnnotations(creatorConstructor);
-                    for (int i = 0; i < types.length; ++i) {
+                    for (int i = 0; i < types.length && i < paramAnnotationArrays.length; ++i) {
                         Annotation[] paramAnnotations = paramAnnotationArrays[i];
                         JSONField fieldAnnotation = null;
                         for (Annotation paramAnnotation : paramAnnotations) {
@@ -396,7 +449,7 @@ public class JavaBeanInfo {
                 String[] paramNames = null;
                 if (kotlin && constructors.length > 0) {
                     paramNames = TypeUtils.getKoltinConstructorParameters(clazz);
-                    creatorConstructor = TypeUtils.getKoltinConstructor(constructors, paramNames);
+                    creatorConstructor = TypeUtils.getKotlinConstructor(constructors, paramNames);
                     TypeUtils.setAccessible(creatorConstructor);
                 } else {
 
@@ -409,6 +462,8 @@ public class JavaBeanInfo {
                                 creatorConstructor.setAccessible(true);
                                 paramNames = ASMUtils.lookupParameterNames(constructor);
                                 break;
+                            } else {
+                                continue;
                             }
                         }
 
@@ -421,6 +476,8 @@ public class JavaBeanInfo {
                                 creatorConstructor.setAccessible(true);
                                 paramNames = new String[] {"principal", "credentials", "authorities"};
                                 break;
+                            } else {
+                                continue;
                             }
                         }
 
@@ -430,6 +487,8 @@ public class JavaBeanInfo {
                                 creatorConstructor = constructor;
                                 paramNames = new String[] {"authority"};
                                 break;
+                            } else {
+                                continue;
                             }
                         }
 
@@ -508,8 +567,7 @@ public class JavaBeanInfo {
                         add(fieldList, fieldInfo);
                     }
 
-                    if ((!kotlin)
-                            && !clazz.getName().equals("javax.servlet.http.Cookie")) {
+                    if ((!kotlin) && !clazz.getName().equals("javax.servlet.http.Cookie")) {
                         return new JavaBeanInfo(clazz, builderClass, null, creatorConstructor, null, null, jsonType, fieldList);
                     }
                 } else {
@@ -563,7 +621,7 @@ public class JavaBeanInfo {
                     if (annotation.name().length() != 0) {
                         String propertyName = annotation.name();
                         add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures,
-                                annotation, null, null));
+                                annotation, null, null, genericInfo));
                         continue;
                     }
                 }
@@ -579,11 +637,11 @@ public class JavaBeanInfo {
                         if (!methodName.startsWith(withPrefix)) {
                             continue;
                         }
-    
+
                         if (methodName.length() <= withPrefix.length()) {
                             continue;
                         }
-    
+                        
                         properNameBuilder = new StringBuilder(methodName.substring(withPrefix.length()));
                     }
                 }
@@ -598,7 +656,7 @@ public class JavaBeanInfo {
                 String propertyName = properNameBuilder.toString();
 
                 add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures,
-                        annotation, null, null));
+                        annotation, null, null, genericInfo));
             }
 
             if (builderClass != null) {
@@ -669,7 +727,7 @@ public class JavaBeanInfo {
                     && types[0] == String.class
                     && types[1] == Object.class) {
                 add(fieldList, new FieldInfo("", method, null, clazz, type, ordinal,
-                        serialzeFeatures, parserFeatures, annotation, null, null));
+                        serialzeFeatures, parserFeatures, annotation, null, null, genericInfo));
                 continue;
             }
 
@@ -697,7 +755,7 @@ public class JavaBeanInfo {
                 if (annotation.name().length() != 0) {
                     String propertyName = annotation.name();
                     add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, ordinal, serialzeFeatures, parserFeatures,
-                            annotation, null, null));
+                            annotation, null, null, genericInfo));
                     continue;
                 }
             }
@@ -709,25 +767,75 @@ public class JavaBeanInfo {
             char c3 = methodName.charAt(3);
 
             String propertyName;
+            Field field = null;
+            // 用于存储KotlinBean中所有的get方法, 方便后续判断
+            List<String> getMethodNameList = null;
+
+            if (kotlin) {
+                getMethodNameList = new ArrayList();
+                for (int i = 0; i < methods.length; i++) {
+                    if (methods[i].getName().startsWith("get")) {
+                        getMethodNameList.add(methods[i].getName());
+                    }
+                }
+            }
+
             if (Character.isUpperCase(c3) //
                     || c3 > 512 // for unicode method name
                     ) {
-                if (TypeUtils.compatibleWithJavaBean) {
-                    propertyName = TypeUtils.decapitalize(methodName.substring(3));
+                // 这里本身的逻辑是通过setAbc这类方法名解析出成员变量名为abc或者Abc, 但是在kotlin中, isAbc, abc成员变量的set方法都是setAbc
+                // 因此如果是kotlin的话还需要进行不一样的判断, 判断的方式是通过get方法进行判断, isAbc的get方法名为isAbc(), abc的get方法名为getAbc()
+                if (kotlin) {
+                    String getMethodName = "g" + methodName.substring(1);
+                    propertyName = TypeUtils.getPropertyNameByMethodName(getMethodName);
                 } else {
-                    propertyName = Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4);
+                    if (TypeUtils.compatibleWithJavaBean) {
+                        propertyName = TypeUtils.decapitalize(methodName.substring(3));
+                    } else {
+                        propertyName = TypeUtils.getPropertyNameByMethodName(methodName);
+                    }
                 }
+
             } else if (c3 == '_') {
-                propertyName = methodName.substring(4);
+                // 这里本身的逻辑是通过set_abc这类方法名解析出成员变量名为abc, 但是在kotlin中, is_abc和_abc成员变量的set方法都是set_abc
+                // 因此如果是kotlin的话还需要进行不一样的判断, 判断的方式是通过get方法进行判断, is_abc的get方法名为is_abc(), _abc的get方法名为get_abc()
+                if (kotlin) {
+                    String getMethodName = "g" + methodName.substring(1);
+                    if (getMethodNameList.contains(getMethodName)) {
+                        propertyName = methodName.substring(3);
+                    } else {
+                        propertyName = "is" + methodName.substring(3);
+                    }
+                    field = TypeUtils.getField(clazz, propertyName, declaredFields);
+                } else {
+                    propertyName = methodName.substring(4);
+                    field = TypeUtils.getField(clazz, propertyName, declaredFields);
+                    if (field == null) {
+                        String temp = propertyName;
+                        propertyName = methodName.substring(3);
+                        field = TypeUtils.getField(clazz, propertyName, declaredFields);
+                        if (field == null) {
+                            propertyName = temp; //减少修改代码带来的影响
+                        }
+                    }
+                }
+
             } else if (c3 == 'f') {
                 propertyName = methodName.substring(3);
             } else if (methodName.length() >= 5 && Character.isUpperCase(methodName.charAt(4))) {
                 propertyName = TypeUtils.decapitalize(methodName.substring(3));
             } else {
-                continue;
+                propertyName = methodName.substring(3);
+                field = TypeUtils.getField(clazz, propertyName, declaredFields);
+                if (field == null) {
+                    continue;
+                }
             }
 
-            Field field = TypeUtils.getField(clazz, propertyName, declaredFields);
+            if (field == null) {
+                field = TypeUtils.getField(clazz, propertyName, declaredFields);
+            }
+
             if (field == null && types[0] == boolean.class) {
                 String isFieldName = "is" + Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
                 field = TypeUtils.getField(clazz, isFieldName, declaredFields);
@@ -749,7 +857,7 @@ public class JavaBeanInfo {
                     if (fieldAnnotation.name().length() != 0) {
                         propertyName = fieldAnnotation.name();
                         add(fieldList, new FieldInfo(propertyName, method, field, clazz, type, ordinal,
-                                serialzeFeatures, parserFeatures, annotation, fieldAnnotation, null));
+                                serialzeFeatures, parserFeatures, annotation, fieldAnnotation, null, genericInfo));
                         continue;
                     }
                 }
@@ -761,7 +869,7 @@ public class JavaBeanInfo {
             }
 
             add(fieldList, new FieldInfo(propertyName, method, field, clazz, type, ordinal, serialzeFeatures, parserFeatures,
-                    annotation, fieldAnnotation, null));
+                    annotation, fieldAnnotation, null, genericInfo));
         }
 
         Field[] fields = clazz.getFields();
@@ -789,6 +897,7 @@ public class JavaBeanInfo {
                         || AtomicLong.class == method.getReturnType() //
                         ) {
                     String propertyName;
+                    Field collectionField = null;
 
                     JSONField annotation = TypeUtils.getAnnotation(method, JSONField.class);
                     if (annotation != null && annotation.deserialize()) {
@@ -798,13 +907,18 @@ public class JavaBeanInfo {
                     if (annotation != null && annotation.name().length() > 0) {
                         propertyName = annotation.name();
                     } else {
-                        propertyName = Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4);
+                        propertyName = TypeUtils.getPropertyNameByMethodName(methodName);
 
                         Field field = TypeUtils.getField(clazz, propertyName, declaredFields);
                         if (field != null) {
                             JSONField fieldAnnotation = TypeUtils.getAnnotation(field, JSONField.class);
                             if (fieldAnnotation != null && !fieldAnnotation.deserialize()) {
                                 continue;
+                            }
+
+                            if (Collection.class.isAssignableFrom(method.getReturnType())
+                                || Map.class.isAssignableFrom(method.getReturnType())) {
+                                collectionField = field;
                             }
                         }
                     }
@@ -818,7 +932,7 @@ public class JavaBeanInfo {
                         continue;
                     }
 
-                    add(fieldList, new FieldInfo(propertyName, method, null, clazz, type, 0, 0, 0, annotation, null, null));
+                    add(fieldList, new FieldInfo(propertyName, method, collectionField, clazz, type, 0, 0, 0, annotation, null, null, genericInfo));
                 }
             }
         }
@@ -839,6 +953,8 @@ public class JavaBeanInfo {
     }
 
     private static void computeFields(Class<?> clazz, Type type, PropertyNamingStrategy propertyNamingStrategy, List<FieldInfo> fieldList, Field[] fields) {
+        Map<TypeVariable, Type> genericInfo = buildGenericInfo(clazz);
+
         for (Field field : fields) { // public static fields
             int modifiers = field.getModifiers();
             if ((modifiers & Modifier.STATIC) != 0) {
@@ -893,7 +1009,7 @@ public class JavaBeanInfo {
             }
 
             add(fieldList, new FieldInfo(propertyName, null, field, clazz, type, ordinal, serialzeFeatures, parserFeatures, null,
-                    fieldAnnotation, null));
+                    fieldAnnotation, null, genericInfo));
         }
     }
 
@@ -947,6 +1063,7 @@ public class JavaBeanInfo {
 
         for (Constructor constructor : constructors) {
             Annotation[][] paramAnnotationArrays = TypeUtils.getParameterAnnotations(constructor);
+
             if (paramAnnotationArrays.length == 0) {
                 continue;
             }

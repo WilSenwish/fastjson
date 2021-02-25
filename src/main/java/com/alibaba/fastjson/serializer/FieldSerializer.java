@@ -23,8 +23,6 @@ import com.alibaba.fastjson.util.TypeUtils;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
-import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 
@@ -59,13 +57,7 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
         this.fieldInfo = fieldInfo;
         this.fieldContext = new BeanContext(beanType, fieldInfo);
 
-        if (beanType != null
-                && (fieldInfo.isEnum
-                    || fieldInfo.fieldClass == long.class
-                    || fieldInfo.fieldClass == Long.class
-                    || fieldInfo.fieldClass == BigInteger.class
-                    || fieldInfo.fieldClass == BigDecimal.class)
-        ) {
+        if (beanType != null) {
             JSONType jsonType = TypeUtils.getAnnotation(beanType,JSONType.class);
             if (jsonType != null) {
                 for (SerializerFeature feature : jsonType.serialzeFeatures()) {
@@ -78,6 +70,8 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
                     } else if(feature == SerializerFeature.BrowserCompatible){
                         features |= SerializerFeature.BrowserCompatible.mask;
                         browserCompatible = true;
+                    } else if (feature == SerializerFeature.WriteMapNullValue) {
+                        features |= SerializerFeature.WriteMapNullValue.mask;
                     }
                 }
             }
@@ -115,7 +109,7 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
                 }
             }
             
-            features = SerializerFeature.of(annotation.serialzeFeatures());
+            features |= SerializerFeature.of(annotation.serialzeFeatures());
         }
         
         this.writeNull = writeNull;
@@ -245,7 +239,8 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
             } else if (Boolean.class == runtimeFieldClass) {
                 out.writeNull(features, SerializerFeature.WriteNullBooleanAsFalse.mask);
                 return;
-            } else if (Collection.class.isAssignableFrom(runtimeFieldClass)) {
+            } else if (Collection.class.isAssignableFrom(runtimeFieldClass)
+                    || runtimeFieldClass.isArray()) {
                 out.writeNull(features, SerializerFeature.WriteNullListAsEmpty.mask);
                 return;
             }
@@ -307,13 +302,12 @@ public class FieldSerializer implements Comparable<FieldSerializer> {
 
         if ((features & SerializerFeature.WriteClassName.mask) != 0
                 && valueClass != fieldInfo.fieldClass
-                && JavaBeanSerializer.class.isInstance(valueSerializer)) {
+                && valueSerializer instanceof JavaBeanSerializer) {
             ((JavaBeanSerializer) valueSerializer).write(serializer, propertyValue, fieldInfo.name, fieldInfo.fieldType, fieldFeatures, false);
             return;
         }
 
-        if (browserCompatible && propertyValue != null
-                && (fieldInfo.fieldClass == long.class || fieldInfo.fieldClass == Long.class)) {
+        if (browserCompatible && (fieldInfo.fieldClass == long.class || fieldInfo.fieldClass == Long.class)) {
             long value = (Long) propertyValue;
             if (value > 9007199254740991L || value < -9007199254740991L) {
                 serializer.getWriter().writeString(Long.toString(value));

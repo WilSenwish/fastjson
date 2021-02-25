@@ -1,6 +1,7 @@
 package com.alibaba.fastjson.serializer;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
 import com.alibaba.fastjson.parser.DefaultJSONParser;
 import com.alibaba.fastjson.parser.JSONLexer;
 import com.alibaba.fastjson.parser.JSONToken;
@@ -11,6 +12,7 @@ import java.util.Locale;
 import java.util.TimeZone;
 
 import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
+import com.alibaba.fastjson.util.TypeUtils;
 import org.joda.time.*;
 import org.joda.time.format.*;
 
@@ -124,6 +126,19 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
 
                 return (T) duration;
             } else if (type == Instant.class) {
+                boolean digit = true;
+                for (int i = 0; i < text.length(); ++i) {
+                    char ch = text.charAt(i);
+                    if (ch < '0' || ch > '9') {
+                        digit = false;
+                        break;
+                    }
+                }
+                if (digit && text.length() > 8 && text.length() < 19) {
+                    long epochMillis = Long.parseLong(text);
+                    return (T) new Instant(epochMillis);
+                }
+
                 Instant instant = Instant.parse(text);
 
                 return (T) instant;
@@ -143,7 +158,7 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
                 return (T) new DateTime(millis, DateTimeZone.forTimeZone(timeZone));
             }
 
-            LocalDateTime localDateTime =  new LocalDateTime(millis, DateTimeZone.forTimeZone(timeZone));
+            LocalDateTime localDateTime = new LocalDateTime(millis, DateTimeZone.forTimeZone(timeZone));
             if (type == LocalDateTime.class) {
                 return (T) localDateTime;
             }
@@ -163,6 +178,23 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
             }
 
             throw new UnsupportedOperationException();
+        } else if (lexer.token() == JSONToken.LBRACE) {
+            JSONObject object = parser.parseObject();
+
+            if (type == Instant.class) {
+                Object epochSecond = object.get("epochSecond");
+
+                if (epochSecond instanceof Number) {
+                    return (T) Instant.ofEpochSecond(
+                                TypeUtils.longExtractValue((Number) epochSecond));
+                }
+
+                Object millis = object.get("millis");
+                if (millis instanceof Number) {
+                    return (T) Instant.ofEpochMilli(
+                            TypeUtils.longExtractValue((Number) millis));
+                }
+            }
         } else {
             throw new UnsupportedOperationException();
         }
@@ -247,6 +279,19 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
                     formatter = formatter_dt19_kr;
                 }
             }
+
+            boolean digit = true;
+            for (int i = 0; i < text.length(); ++i) {
+                char ch = text.charAt(i);
+                if (ch < '0' || ch > '9') {
+                    digit = false;
+                    break;
+                }
+            }
+            if (digit && text.length() > 8 && text.length() < 19) {
+                long epochMillis = Long.parseLong(text);
+                return new LocalDateTime(epochMillis, DateTimeZone.forTimeZone(JSON.defaultTimeZone));
+            }
         }
 
         return formatter == null ? //
@@ -303,6 +348,20 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
                 } else if (c4 == '년') {
                     formatter = formatter_d10_kr;
                 }
+            }
+
+            boolean digit = true;
+            for (int i = 0; i < text.length(); ++i) {
+                char ch = text.charAt(i);
+                if (ch < '0' || ch > '9') {
+                    digit = false;
+                    break;
+                }
+            }
+            if (digit && text.length() > 8 && text.length() < 19) {
+                long epochMillis = Long.parseLong(text);
+                return new LocalDateTime(epochMillis, DateTimeZone.forTimeZone(JSON.defaultTimeZone))
+                        .toLocalDate();
             }
         }
 
@@ -401,6 +460,8 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
                 if (format == null) {
                     if ((features & mask) != 0 || serializer.isEnabled(SerializerFeature.UseISO8601DateFormat)) {
                         format = formatter_iso8601_pattern;
+                    } else if (serializer.isEnabled(SerializerFeature.WriteDateUseDateFormat)) {
+                        format = JSON.DEFFAULT_DATE_FORMAT;
                     } else {
                         int millis = dateTime.getMillisOfSecond();
                         if (millis == 0) {
@@ -413,9 +474,6 @@ public class JodaCodec implements ObjectSerializer, ContextObjectSerializer, Obj
 
                 if (format != null) {
                     write(out, dateTime, format);
-                } else if (out.isEnabled(SerializerFeature.WriteDateUseDateFormat)) {
-                    //使用固定格式转化时间
-                    write(out, dateTime, JSON.DEFFAULT_DATE_FORMAT);
                 } else {
                     out.writeLong(dateTime.toDateTime(DateTimeZone.forTimeZone(JSON.defaultTimeZone)).toInstant().getMillis());
                 }

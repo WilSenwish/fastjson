@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
 
+import com.alibaba.fastjson.TypeReference;
 import com.alibaba.fastjson.parser.DefaultJSONParser;
 import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.parser.JSONLexer;
@@ -53,7 +54,11 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
         final int token = lexer.token();
         if (token == JSONToken.NULL
                 || (token == JSONToken.LITERAL_STRING && lexer.stringVal().length() == 0)) {
-            setValue(object, null);
+            if (object == null) {
+                fieldValues.put(fieldInfo.name, null);
+            } else {
+                setValue(object, null);
+            }
             return;
         }
 
@@ -130,7 +135,9 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
 
                     if (paramIndex != -1) {
                         itemActualTypeArgs[0] = paramType.getActualTypeArguments()[paramIndex];
-                        itemType = new ParameterizedTypeImpl(itemActualTypeArgs, parameterizedItemType.getOwnerType(), parameterizedItemType.getRawType());
+                        itemType = TypeReference.intern(
+                                new ParameterizedTypeImpl(itemActualTypeArgs, parameterizedItemType.getOwnerType(), parameterizedItemType.getRawType())
+                        );
                     }
                 }
             }
